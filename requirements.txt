@@ -1,0 +1,7 @@
+Flask==2.0.1
+requests==2.26.0
+fontTools==4.24.0
+shapely==1.8.0
+numpy==1.21.2
+pdfkit==1.0.0
+geopy==2.2.0

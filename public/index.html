@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>字迹地图</title>
+    <script src="https://webapi.amap.com/maps?v=2.0&key=08f666f4700b8727b98d95a37e3b3674"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            justify-content: center;
+            align-items: center;
+        }
+        #map {
+            width: 100%;
+            height: 600px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        input, select, button {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        button {
+            background-color: #1890ff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #40a9ff;
+        }
+        #download {
+            display: none;
+            margin-top: 10px;
+            text-align: center;
+        }
+        #download a {
+            color: #1890ff;
+            text-decoration: none;
+        }
+        #download a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>字迹地图</h1>
+            <p>输入字符，生成骑行路线</p>
+        </div>
+        <div class="controls">
+            <input id="text" type="text" placeholder="输入字符（如山）" maxlength="5">
+            <select id="distance">
+                <option value="1">1公里</option>
+                <option value="5">5公里</option>
+                <option value="10">10公里</option>
+                <option value="15">15公里</option>
+                <option value="20">20公里</option>
+            </select>
+            <button onclick="generateRoute()">生成骑行路线</button>
+        </div>
+        <div id="map"></div>
+        <!-- <div id="download">
+            <a href="#" target="_blank">下载路线书 (PDF)</a>
+        </div> -->
+    </div>
+    <script>
+        var map = new AMap.Map('map', {
+            zoom: 14,
+            center: [116.397428, 39.90923], // 默认北京
+            resizeEnable: true
+        });
+
+        var startMarker = null;
+        var startPoint = null;
+
+        // Add click event to map for selecting start point
+        map.on('click', function(e) {
+            var lnglat = e.lnglat;
+            if (startMarker) {
+                startMarker.setPosition(lnglat);
+            } else {
+                startMarker = new AMap.Marker({
+                    position: lnglat,
+                    title: '起点'
+                });
+                map.add(startMarker);
+            }
+            startPoint = [lnglat.getLng(), lnglat.getLat()];
+        });
+
+        function generateRoute() {
+            var text = document.getElementById('text').value;
+            var distance = document.getElementById('distance').value;
+            
+            if (!text) {
+                alert('请输入字符');
+                return;
+            }
+
+            if (!startPoint) {
+                alert('请在地图上选择起点');
+                return;
+            }
+
+            // Clear previous route if exists
+            map.clearMap();
+            // Re-add the start marker
+            if (startMarker) {
+                map.add(startMarker);
+            }
+
+            fetch('/generate_route', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    text: text, 
+                    distance: distance,
+                    start_point: startPoint
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    alert(data.error);
+                    return;
+                }
+                var path = data.path;
+                var polyline = new AMap.Polyline({
+                    path: path,
+                    strokeColor: "#FF6600",
+                    strokeWeight: 5
+                });
+                map.add(polyline);
+                map.setFitView();
+            })
+            .catch(error => {
+                alert('生成路线失败: ' + error);
+            });
+        }
+    </script>
+</body>
+</html>
