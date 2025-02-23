@@ -1,143 +1,187 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template
 import requests
-from fontTools.ttLib import TTFont, TTLibError
-from shapely.geometry import LineString
+from fontTools.ttLib import TTFont
+from fontTools.pens.ttGlyphPen import TTGlyphPen
 import numpy as np
-import pdfkit
-import os
+import logging
 
-app = Flask(__name__, static_folder='../public', static_url_path='/')
+app = Flask(__name__)
+
+# 配置日志
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('app.log'),  # 输出到文件
+        logging.StreamHandler()          # 同时输出到控制台
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# 高德API Key（替换为你的实际Key）
+AMAP_API_KEY = "73106bae7c543acc43670ce44c77f340"
+
+# 高德API endpoints
+RIDING_URL = "https://restapi.amap.com/v4/direction/bicycling"
+COORD_CONVERT_URL = "https://restapi.amap.com/v3/assistant/coordinate/convert"
+
+def get_text_contour(text, font_path="src/fonts/SimHei.ttf"):
+    """从字体文件中提取文字轮廓点"""
+    logger.info(f"提取文字轮廓: {text}")
+    try:
+        font = TTFont(font_path)
+        cmap = font['cmap'].getBestCmap()
+        if not cmap:
+            logger.error("字体文件缺少cmap表")
+            raise Exception("字体文件缺少cmap表")
+        
+        char_code = ord(text)
+        if char_code not in cmap:
+            logger.error(f"字体不支持字符 '{text}' (Unicode: {char_code})")
+            raise Exception(f"字体不支持字符 '{text}'")
+        
+        glyph_name = cmap[char_code]
+        glyph_set = font.getGlyphSet()
+        if glyph_name not in glyph_set:
+            logger.error(f"字形 '{glyph_name}' 未找到")
+            raise Exception(f"字形 '{glyph_name}' 未找到")
+        
+        # 使用TTGlyphPen绘制字形并获取路径
+        pen = TTGlyphPen(None)
+        glyph_set[glyph_name].draw(pen)
+        glyph = pen.glyph()  # 获取生成的字形对象
+        
+        # 从glyph中提取轮廓点
+        points = []
+        for contour in glyph.coordinates:  # glyph.coordinates 包含所有轮廓点
+            points.append((contour[0], contour[1]))
+        
+        logger.debug(f"轮廓点数: {len(points)}")
+        return points
+    except Exception as e:
+        logger.error(f"文字轮廓提取失败: {str(e)}")
+        raise
+
+def smooth_contour(points, num_points=20):
+    """平滑轮廓点并减少数量"""
+    logger.info("平滑轮廓点")
+    try:
+        points = np.array(points)
+        t = np.linspace(0, 1, len(points))
+        t_new = np.linspace(0, 1, num_points)
+        x = np.interp(t_new, t, points[:, 0])
+        y = np.interp(t_new, t, points[:, 1])
+        smoothed = list(zip(x, y))
+        logger.debug(f"平滑后点数: {len(smoothed)}")
+        return smoothed
+    except Exception as e:
+        logger.error(f"轮廓平滑失败: {str(e)}")
+        raise
+
+def map_to_real_coords(points, center_lat=39.9042, center_lng=116.4074, scale=0.001):
+    """将虚拟坐标映射到真实经纬度"""
+    logger.info("映射坐标到经纬度")
+    real_coords = []
+    for x, y in points:
+        lat = center_lat + y * scale
+        lng = center_lng + x * scale
+        real_coords.append((lng, lat))
+    logger.debug(f"映射后的坐标: {real_coords[:5]}...")  # 只记录前5个避免日志过长
+    return real_coords
+
+def convert_coords(coords):
+    """将WGS84坐标转为高德GCJ-02坐标"""
+    logger.info("转换坐标到GCJ-02")
+    try:
+        locations = ";".join([f"{lng},{lat}" for lng, lat in coords])
+        params = {
+            "key": AMAP_API_KEY,
+            "locations": locations,
+            "coordsys": "wgs84"
+        }
+        response = requests.get(COORD_CONVERT_URL, params=params)
+        data = response.json()
+        logger.debug(f"坐标转换响应: {data}")
+        if data["status"] == "1":
+            return [tuple(map(float, loc.split(","))) for loc in data["locations"].split(";")]
+        else:
+            logger.error(f"坐标转换失败: {data}")
+            return []
+    except Exception as e:
+        logger.error(f"坐标转换异常: {str(e)}")
+        raise
+
+def get_riding_path(origin, destination):
+    logger.info(f"规划路径: {origin} -> {destination}")
+    try:
+        params = {
+            "key": AMAP_API_KEY,
+            "origin": f"{origin[0]},{origin[1]}",
+            "destination": f"{destination[0]},{destination[1]}"
+        }
+        response = requests.get(RIDING_URL, params=params)
+        data = response.json()
+        logger.debug(f"路径规划响应: {data}")
+        if data["errcode"] == 0:
+            steps = data["data"]["paths"][0]["steps"]
+            full_polyline = []
+            for step in steps:
+                polyline = step["polyline"]
+                points = [tuple(map(float, point.split(","))) for point in polyline.split(";")]
+                full_polyline.extend(points[:-1])  # 避免重复最后一个点
+            full_polyline.append(points[-1])  # 添加终点
+            return full_polyline
+        else:
+            logger.error(f"路径规划失败: {data}")
+            return []
+    except Exception as e:
+        logger.error(f"路径规划异常: {str(e)}")
+        raise
+
+def generate_riding_track(text, city_center=(116.4074, 39.9042)):
+    """生成文字形状骑行轨迹"""
+    logger.info(f"开始生成骑行轨迹，文字: {text}")
+    try:
+        contour_points = get_text_contour(text)
+        smoothed_points = smooth_contour(contour_points, num_points=10)
+        real_coords = map_to_real_coords(smoothed_points, center_lat=city_center[1], center_lng=city_center[0])
+        gcj_coords = convert_coords(real_coords)
+        if not gcj_coords:
+            raise Exception("坐标转换结果为空")
+        
+        full_path = []
+        for i in range(len(gcj_coords) - 1):
+            path_segment = get_riding_path(gcj_coords[i], gcj_coords[i + 1])
+            if not path_segment:
+                logger.warning(f"路径段 {i} 为空，跳过")
+                continue
+            full_path.extend(path_segment[:-1])
+        full_path.append(gcj_coords[-1])
+        
+        logger.info(f"轨迹生成完成，点数: {len(full_path)}")
+        return full_path
+    except Exception as e:
+        logger.error(f"轨迹生成失败: {str(e)}")
+        raise
 
 @app.route('/')
 def index():
-    return app.send_static_file('index.html')
-AMAP_KEY = "e5bc839f31cd8c9d1a8ba3b8e9a595b4"  # Updated to match web API key
+    return render_template('index.html')
 
-# Use an open-source font that supports Chinese characters
-FONT_PATH = os.path.join(os.path.dirname(__file__), 'fonts', 'static', 'NotoSansSC-Regular.ttf')
-
-def get_char_outline(text):
-    font = TTFont(FONT_PATH)
-    glyph = font.getGlyphSet()[font.getBestCmap()[ord(text[0])]]
-    coords = []
-    pen = type('Pen', (), {'moveTo': lambda self, pt: coords.append(pt), 'lineTo': lambda self, pt: coords.append(pt), 'closePath': lambda self: None})()
-    glyph.draw(pen)
-    return LineString(coords)
-
-def scale_to_distance(outline, target_distance_km):
-    current_length = outline.length
-    scale = (target_distance_km * 1000) / current_length
-    # Normalize coordinates to maintain aspect ratio
-    coords = np.array(outline.coords)
-    min_x, min_y = coords.min(axis=0)
-    max_x, max_y = coords.max(axis=0)
-    width = max_x - min_x
-    height = max_y - min_y
-    aspect_ratio = width / height if height != 0 else 1
-    
-    # Center the coordinates
-    coords = coords - np.array([min_x + width/2, min_y + height/2])
-    
-    # Scale coordinates while maintaining aspect ratio
-    scaled_coords = [(x * scale * aspect_ratio / 111000, y * scale / 111000) for x, y in coords]
-    return scaled_coords
-
-def get_bicycling_route(origin, waypoints, destination):
-    url = "https://restapi.amap.com/v4/direction/bicycling"
-    params = {
-        "origin": f"{origin[0]},{origin[1]}",
-        "destination": f"{destination[0]},{destination[1]}",
-        "key": AMAP_KEY
-    }
-    segments = [origin] + waypoints + [destination]
-    full_path = []
-    
-    # Calculate approximate segment distances for better shape control
-    total_segments = len(segments) - 1
-    app.logger.info(f"Processing {total_segments} route segments")
-    
-    for i in range(total_segments):
-        params["origin"] = f"{segments[i][0]},{segments[i][1]}"
-        params["destination"] = f"{segments[i+1][0]},{segments[i+1][1]}"
-        response = requests.get(url, params=params)
-        data = response.json()
-        
-        if data.get('errcode') == 0 and data.get('data', {}).get('paths'):
-            path = [(float(p['lng']), float(p['lat'])) 
-                   for p in data['data']['paths'][0]['steps'][0]['polyline']]
-            # Add logging for debugging
-            app.logger.info(f"Segment {i+1}/{total_segments}: {len(path)} points")
-            full_path.extend(path[:-1])
-        else:
-            app.logger.error(f"Failed to get route for segment {i+1}: {data}")
-    
-    full_path.append(segments[-1])
-    app.logger.info(f"Total route points: {len(full_path)}")
-    return full_path
-
-def generate_roadbook(path):
-    html = f"""
-    <html>
-    <body>
-        <h1>您的骑行路线书</h1>
-        <img src="https://restapi.amap.com/v3/staticmap?key={AMAP_KEY}&size=500*300&path=2,0xff6600:{';'.join([f'{x},{y}' for x,y in path])}">
-        <p>总距离: {len(path) * 0.01} 公里（示例计算）</p>
-    </body>
-    </html>
-    """
-    output_path = os.path.join(os.path.dirname(__file__), '..', 'public', 'roadbook.pdf')
-    pdfkit.from_string(html, output_path)
-    return 'roadbook.pdf'
-
-@app.route('/generate_route', methods=['POST'])
-def generate_route():
+@app.route('/generate_track', methods=['POST'])
+def generate_track():
+    data = request.get_json()
+    text = data.get('text', '中')
+    logger.info(f"收到生成请求，文字: {text}")
     try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "No data provided"}), 400
-            
-        if 'text' not in data or 'distance' not in data or 'start_point' not in data:
-            return jsonify({"error": "Missing required fields: text, distance, and start_point"}), 400
-            
-        text = data['text']
-        if not text or len(text) == 0:
-            return jsonify({"error": "Text cannot be empty"}), 400
-            
-        try:
-            distance = float(data['distance'])
-            if distance <= 0:
-                return jsonify({"error": "Distance must be positive"}), 400
-        except ValueError:
-            return jsonify({"error": "Distance must be a valid number"}), 400
-            
-        if not os.path.exists(FONT_PATH):
-            return jsonify({"error": "Font file not found"}), 500
-        
-        # 1. Get character outline
-        outline = get_char_outline(text)
-        
-        # 2. Scale to target distance
-        scaled_coords = scale_to_distance(outline, distance)
-        
-        # 3. Map to coordinates (using user-selected starting point)
-        origin = data['start_point']
-        waypoints = [(origin[0] + x, origin[1] + y) for x, y in scaled_coords[:-1]]
-        destination = (origin[0] + scaled_coords[-1][0], origin[1] + scaled_coords[-1][1])
-        
-        # 4. Generate cycling route
-        path = get_bicycling_route(origin, waypoints, destination)
-        app.logger.info(f"Generated cycling route path: {path}")
-
-        return jsonify({
-            "path": path
-        })
-    except requests.RequestException as e:
-        return jsonify({"error": f"Error calling map API: {str(e)}"}), 500
-    except TTLibError as e:
-        return jsonify({"error": f"Error processing font: {str(e)}"}), 500
+        track = generate_riding_track(text)
+        if not track:
+            return jsonify({"status": "error", "message": "生成的轨迹为空"})
+        return jsonify({"status": "success", "track": track})
     except Exception as e:
-        app.logger.error(f"Unexpected error: {str(e)}")
-        return jsonify({"error": "An unexpected error occurred"}), 500
+        logger.error(f"生成轨迹请求失败: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)})
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    logger.info("启动Flask应用")
+    app.run(debug=True, host='0.0.0.0', port=5001)

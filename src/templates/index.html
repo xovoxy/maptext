@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文字骑行轨迹生成</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            overflow: hidden;
+            background: #f0f2f5;
+        }
+        #map {
+            height: 100vh;
+            width: 100vw;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+        }
+        .control-panel {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 2;
+            background: rgba(255, 255, 255, 0.9);
+            padding: 15px 25px;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        h1 {
+            margin: 0;
+            font-size: 24px;
+            color: #333;
+            font-weight: 600;
+        }
+        input[type="text"] {
+            padding: 10px 15px;
+            font-size: 16px;
+            border: none;
+            border-radius: 8px;
+            outline: none;
+            background: #f8f9fa;
+            box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.05);
+            width: 200px;
+            transition: all 0.3s ease;
+        }
+        input[type="text"]:focus {
+            background: #fff;
+            box-shadow: 0 0 8px rgba(0, 123, 255, 0.3);
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            border: none;
+            border-radius: 8px;
+            background: #007bff;
+            color: white;
+            cursor: pointer;
+            transition: background 0.3s ease;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:active {
+            background: #004085;
+        }
+        @media (max-width: 768px) {
+            .control-panel {
+                flex-direction: column;
+                width: 90%;
+                padding: 10px;
+            }
+            input[type="text"] {
+                width: 100%;
+            }
+        }
+    </style>
+    <!-- 高德地图JS API -->
+    <script src="https://webapi.amap.com/maps?v=2.0&key=08f666f4700b8727b98d95a37e3b3674"></script>
+</head>
+<body>
+    <div id="map"></div>
+    <div class="control-panel">
+        <h1>文字骑行轨迹</h1>
+        <input type="text" id="textInput" placeholder="输入一个汉字（如：中）">
+        <button onclick="generateTrack()">生成轨迹</button>
+    </div>
+
+    <script>
+        // 初始化地图
+        var map = new AMap.Map('map', {
+            zoom: 12,
+            center: [116.4074, 39.9042], // 北京中心
+            resizeEnable: true
+        });
+
+        function generateTrack() {
+            var text = document.getElementById('textInput').value || '中';
+            fetch('/generate_track', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: text })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    var path = data.track;
+                    // 清除之前的轨迹
+                    map.clearMap();
+                    // 绘制新轨迹
+                    var polyline = new AMap.Polyline({
+                        path: path,
+                        strokeColor: '#FF5733', // 更鲜艳的颜色
+                        strokeWeight: 6,
+                        strokeOpacity: 0.9,
+                        lineJoin: 'round',
+                        lineCap: 'round'
+                    });
+                    map.add(polyline);
+                    // 调整地图视角
+                    map.setFitView([polyline], false, [50, 50, 50, 50]); // 添加边距
+                } else {
+                    alert('生成失败：' + data.message);
+                }
+            })
+            .catch(error => {
+                alert('请求错误：' + error);
+            });
+        }
+
+        // 监听回车键触发生成
+        document.getElementById('textInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                generateTrack();
+            }
+        });
+    </script>
+</body>
+</html>
